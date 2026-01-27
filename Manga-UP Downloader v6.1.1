@@ -1,0 +1,111 @@
+
+
+    // ==UserScript==
+    // @name           Manga-UP Downloader (Double Click – On Screen Only)
+    // @name:en        Manga-UP Downloader (Double Click – On Screen Only)
+    // @namespace      https://greasyfork.org/en/users/1553223-ozler365
+    // @version        6.1.1
+    // @description    Download visible Manga-UP pages only using double-click or Alt+S.
+    // @description:en Download visible Manga-UP pages only using double-click or Alt+S. Downloads only images currently on screen.
+    // @author         ozler365
+    // @license        MIT
+    // @match          https://global.manga-up.com/*
+    // @run-at         document-end
+    // @grant          none
+    // ==/UserScript==
+     
+    (() => {
+      'use strict';
+     
+      let counter = 1;
+     
+      function clean(s) {
+        return s.replace(/[\\/:*?"<>|]+/g, '').trim();
+      }
+     
+      function meta() {
+        const title = clean(document.title || 'Manga-UP');
+        const manga = clean(title.split('-')[0] || 'Manga');
+        const ch =
+          (title.match(/chapter\s*([\d.]+)/i) || [])[1] || 'X';
+        return { manga, ch };
+      }
+     
+      function getVisiblePages() {
+        return [...document.querySelectorAll('img.G54Y0W_page')]
+          .filter(img => {
+            if (!img.src.startsWith('blob:')) return false;
+            if (img.naturalWidth < 300) return false;
+     
+            const r = img.getBoundingClientRect();
+            return (
+              r.width > 50 &&
+              r.height > 50 &&
+              r.right  > 0 &&
+              r.left   < window.innerWidth &&
+              r.bottom > 0 &&
+              r.top    < window.innerHeight
+            );
+          });
+      }
+     
+      function saveImage(img, filename) {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+     
+        canvas.toBlob(blob => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+          }, 800);
+        }, 'image/jpeg', 0.92);
+      }
+     
+      function downloadCurrentView() {
+        const pages = getVisiblePages();
+        if (!pages.length) return;
+     
+        // Manga order: RIGHT → LEFT
+        pages.sort((a, b) =>
+          b.getBoundingClientRect().left -
+          a.getBoundingClientRect().left
+        );
+     
+        const { manga, ch } = meta();
+     
+        pages.forEach((img, i) => {
+          const name =
+            `${manga} ch${ch}_` +
+            `${String(counter).padStart(3, '0')}` +
+            (pages.length > 1 ? String.fromCharCode(97 + i) : '') +
+            '.jpg';
+     
+          saveImage(img, name);
+        });
+     
+        counter++;
+      }
+     
+      document.addEventListener('dblclick', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        downloadCurrentView();
+      });
+     
+      document.addEventListener('keydown', e => {
+        if (e.altKey && e.key.toLowerCase() === 's') {
+          downloadCurrentView();
+        }
+      });
+     
+      console.log('[Manga-UP] Double-click downloader (Greasy Fork ready)');
+    })();
+
