@@ -6,7 +6,7 @@
     // @version        13.5.0
     // @description    Manga-UP Ripper with Moveable UI, Series/Chapter renaming, and Red Speed Slider.
     // @author         ozler365 (Modified)
-    // @license        MIT
+    // @license        GPL-3.0-only
     // @match          https://global.manga-up.com/*, https://www.manga-up.com/*
     // @require        https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
     // @require        https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js
