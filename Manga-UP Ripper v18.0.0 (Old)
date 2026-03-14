@@ -1,0 +1,289 @@
+// ==UserScript==
+// @name           Manga-UP Ripper
+// @namespace      https://greasyfork.org/en/users/1553223-ozler365
+// @version        18.0.0
+// @description    Strictly syncs download progress with page navigation. WILL NOT slide until the current image is fully loaded.
+// @author         ozler365
+// @license        GPL-3.0-only
+// @match          https://global.manga-up.com/*
+// @require        https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @require        https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js
+// @grant          none
+// ==/UserScript==
+ 
+(function () {
+  'use strict';
+ 
+  // --- Configuration ---
+  const CONFIG = {
+      IMG_SELECTOR: 'img[src^="blob:"]', 
+      MIN_WAIT: 300,        // Minimum time to look at a page (ms)
+      MAX_WAIT_FOR_LOAD: 10000 // If an image takes >10s, we might have to skip or alert
+  };
+ 
+  // --- State ---
+  const state = {
+      captured: new Map(),
+      isRunning: false
+  };
+ 
+  // --- UI & Styles ---
+  const injectStyles = () => {
+    const style = document.createElement('style');
+    style.textContent = `
+      #mangaup-ui {
+        position: fixed; bottom: 20px; right: 20px; z-index: 999999;
+        font-family: sans-serif; display: flex; flex-direction: column; gap: 5px;
+        align-items: flex-end;
+      }
+      #ripper-btn {
+        padding: 12px 24px;
+        background: #0d3594; color: white; border: none; border-radius: 6px;
+        font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        font-size: 14px;
+      }
+      #ripper-btn:hover { background: #082260; }
+      #ripper-status {
+        background: rgba(0, 0, 0, 0.9); color: #FFD700; padding: 5px 10px;
+        border-radius: 4px; font-size: 12px; font-weight: bold;
+        display: none; pointer-events: none;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+      }
+    `;
+    document.head.appendChild(style);
+  };
+ 
+  // --- Naming Logic ---
+  function getFilename() {
+      const clean = (str) => str.replace(/[\\/:*?"<>|]+/g, ' ').trim();
+      let series = "";
+      let chapter = "Chapter";
+ 
+      // 1. Series Name from Meta
+      const metaTitle = document.querySelector('meta[property="og:title"]');
+      if (metaTitle) {
+          series = metaTitle.content.split('|')[0].trim();
+      } else {
+          series = document.title.split('|')[0].trim();
+      }
+ 
+      // 2. Chapter from Header (Visible Text)
+      // Finds "Chapter 1-2" or similar in the top bar
+      const candidates = document.querySelectorAll('div, span, h1, h2');
+      for (const el of candidates) {
+          const txt = el.innerText ? el.innerText.trim() : "";
+          if (/^(Chapter|Ep)\s+[\d.-]+/.test(txt) && txt.length < 50) {
+              const rect = el.getBoundingClientRect();
+              if (rect.top < 200) { // Must be at the top
+                  chapter = txt;
+                  break;
+              }
+          }
+      }
+ 
+      // Avoid redundancy if series name includes chapter
+      if (series.includes(chapter)) return `${clean(series)}.zip`;
+      return `${clean(series)} - ${clean(chapter)}.zip`;
+  }
+ 
+  // --- Core Helpers ---
+  function getProgress() {
+      const allDivs = document.querySelectorAll('div, span, p');
+      for (const el of allDivs) {
+          if (el.offsetParent === null) continue;
+          const text = el.innerText.trim();
+          const match = text.match(/^(\d+)\s*\/\s*(\d+)$/);
+          if (match) {
+              return {
+                  current: parseInt(match[1], 10),
+                  total: parseInt(match[2], 10)
+              };
+          }
+      }
+      return null;
+  }
+ 
+  function captureImage(img) {
+      return new Promise((resolve) => {
+          // STRICT CHECK: Image must be loaded and have dimensions
+          if (!img.complete || img.naturalWidth < 100) return resolve(null);
+          try {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth;
+              canvas.height = img.naturalHeight;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0);
+              canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.95);
+          } catch { resolve(null); }
+      });
+  }
+ 
+  function turnPage() {
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'ArrowLeft', keyCode: 37, bubbles: true
+      }));
+  }
+ 
+  // --- Main Engine ---
+ 
+  async function scanCurrentView() {
+      const images = document.querySelectorAll(CONFIG.IMG_SELECTOR);
+      let foundNew = false;
+ 
+      for (const img of images) {
+          if (img.naturalWidth < 300) continue;
+          
+          const id = img.src; 
+          if (!state.captured.has(id)) {
+              const blob = await captureImage(img);
+              if (blob) {
+                  // Save with page number preference from Alt, or incremental
+                  let pageNum = state.captured.size + 1;
+                  const m = (img.alt || "").match(/page_(\d+)/);
+                  if (m) pageNum = parseInt(m[1], 10);
+ 
+                  state.captured.set(id, { blob, pageNum });
+                  foundNew = true;
+              }
+          }
+      }
+      return foundNew;
+  }
+ 
+  async function runRipper(btn, statusLabel) {
+      if (state.isRunning) {
+          state.isRunning = false;
+          btn.innerText = "Stopping...";
+          return;
+      }
+ 
+      state.isRunning = true;
+      state.captured.clear();
+      btn.innerText = "Stop (Zipping...)";
+      statusLabel.style.display = 'block';
+ 
+      let stuckCounter = 0;
+ 
+      while (state.isRunning) {
+          // 1. Where are we?
+          const progress = getProgress();
+          const currentDisplay = progress ? progress.current : 0;
+          const totalDisplay = progress ? progress.total : 0;
+ 
+          // 2. Try to capture visible images
+          const gotNew = await scanCurrentView();
+          const capturedCount = state.captured.size;
+ 
+          statusLabel.innerText = `Saved: ${capturedCount} | On Page: ${currentDisplay}/${totalDisplay || '?'}`;
+ 
+          // 3. STOP CONDITION: Reached End
+          if (totalDisplay > 0 && currentDisplay >= totalDisplay) {
+              // Wait a moment to ensure final page is grabbed
+              if (!gotNew) { 
+                  // If we didn't just grab something, we are truly done
+                  console.log("Finished chapter.");
+                  break;
+              }
+          }
+ 
+          // 4. SYNC-LOCK NAVIGATION LOGIC
+          // Rule: We can only turn the page IF we have captured enough images to match the current page number.
+          // e.g. If we are on Page 5, we MUST have at least 5 images captured.
+          
+          if (capturedCount >= currentDisplay) {
+              // We are safe to move!
+              stuckCounter = 0;
+              statusLabel.style.color = "#4caf50"; // Green (Good)
+              
+              // Small delay to let user see page/ensure capture stability
+              await new Promise(r => setTimeout(r, CONFIG.MIN_WAIT));
+              turnPage();
+              
+              // Wait for UI to update (don't spam arrow keys)
+              await new Promise(r => setTimeout(r, 200)); 
+          } else {
+              // We are MISSING images!
+              // e.g. On Page 5, but only have 4 images.
+              // ACTION: WAIT. Do not turn.
+              stuckCounter++;
+              statusLabel.style.color = "#FFD700"; // Yellow (Waiting)
+              
+              if (gotNew) stuckCounter = 0; // We are making progress, reset counter
+ 
+              if (stuckCounter > 30) { 
+                  // Stuck for ~6 seconds (30 * 200ms)
+                  // Maybe it's a double-page spread counting weirdly? 
+                  // Force a turn to unstick, but warn user.
+                  console.warn("Stuck waiting for image. Forcing turn.");
+                  turnPage();
+                  stuckCounter = 0;
+              }
+ 
+              // Check again in 200ms
+              await new Promise(r => setTimeout(r, 200));
+          }
+      }
+ 
+      finishRip(btn, statusLabel);
+  }
+ 
+  async function finishRip(btn, statusLabel) {
+      state.isRunning = false;
+      const pages = Array.from(state.captured.values());
+ 
+      if (pages.length === 0) {
+          btn.innerText = "Start Rip";
+          statusLabel.innerText = "No pages found.";
+          return;
+      }
+ 
+      btn.innerText = "Zipping...";
+      statusLabel.innerText = "Generating ZIP...";
+      statusLabel.style.color = "#fff";
+ 
+      // Sort
+      pages.sort((a, b) => a.pageNum - b.pageNum);
+ 
+      const zip = new JSZip();
+      pages.forEach((p, i) => {
+          const name = `${String(i + 1).padStart(3, '0')}.jpg`;
+          zip.file(name, p.blob);
+      });
+ 
+      const filename = getFilename();
+ 
+      try {
+          const content = await zip.generateAsync({ type: "blob" });
+          saveAs(content, filename);
+          statusLabel.innerText = "Done!";
+      } catch (e) {
+          statusLabel.innerText = "Error: " + e;
+      }
+ 
+      setTimeout(() => {
+          btn.innerText = "Start Rip";
+          statusLabel.style.display = 'none';
+      }, 4000);
+  }
+ 
+  function createUI() {
+      if (document.getElementById('mangaup-ui')) return;
+      const div = document.createElement('div');
+      div.id = 'mangaup-ui';
+      const status = document.createElement('div');
+      status.id = 'ripper-status';
+      const btn = document.createElement('button');
+      btn.id = 'ripper-btn';
+      btn.innerText = "Start Rip";
+      btn.onclick = () => runRipper(btn, status);
+      div.appendChild(status);
+      div.appendChild(btn);
+      document.body.appendChild(div);
+  }
+ 
+  injectStyles();
+  setInterval(() => {
+      if (!document.getElementById('mangaup-ui')) createUI();
+  }, 1000);
+ 
+})();
