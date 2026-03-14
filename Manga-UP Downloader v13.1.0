@@ -6,7 +6,7 @@
     // @version        13.1.0
     // @description    Based on v13. Adds "Wait for Load" logic and smart Zip naming (Series - Chapter).
     // @author         ozler365 (Modified)
-    // @license        MIT
+    // @license        GPL-3.0-only
     // @match          https://global.manga-up.com/*
     // @require        https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
     // @require        https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js
